@@ -1,61 +1,92 @@
 const http = require('http');
 const Koa = require('koa');
-const app = new Koa();
+const Router = require('koa-router');
 const koaBody = require('koa-body');
+const uuid = require('uuid');
+const app = new Koa();
+const WS = require('ws');
 
-const ticketsStorage = [
-  {
-    name: 'hi from backend',
-    description: 'hello! it is default ticket',
-    id: 1,
-    created: 'today'
-  }
-];
-
-app.use(koaBody({
-  urlencoded: true,
-  }));
-
-app.use(async ctx => {
-  ctx.response.set({
-    'Access-Control-Allow-Origin': '*',
-  });
-
-  const req = ctx.request.querystring;
-  reqArr = req.split('&');
-  reqObj = {};
-  for (const item of reqArr) {
-    itemArr = item.split('=');
-    reqObj[itemArr[0]] = itemArr[1];
+app.use(async (ctx, next) => {
+  const origin = ctx.request.get('Origin');
+  if (!origin) {
+    return await next();
   }
 
-  switch ( reqObj.method ) {
-      case 'allTickets':
-          ctx.response.body = ticketsStorage;
-          return;
-      case 'postTicket':
-          const {name, description} = ctx.request.body;
-          const objToAdd = {
-            name: name,
-            description: description,
-            created: new Date,
-            id: Math.floor(Math.random() * 10000),
-          }
-          ticketsStorage.push(objToAdd);
-          return;
-      case 'getTicket':
-        for (const item of ticketsStorage) {
-          if (item.id == reqObj.id) {
-            ctx.response.body = item.description;
-          }
-        }
-        ctx.response.status = 200;
-        return;
-      default:
-          ctx.response.status = 404;
-          return;
+  const headers = { 'Access-Control-Allow-Origin': '*', };
+
+  if (ctx.request.method !== 'OPTIONS') {
+    ctx.response.set({ ...headers });
+    try {
+      return await next();
+    } catch (e) {
+      e.headers = { ...e.headers, ...headers };
+      throw e;
+    }
+  }
+
+  if (ctx.request.get('Access-Control-Request-Method')) {
+    ctx.response.set({
+      ...headers,
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH',
+    });
+
+    if (ctx.request.get('Access-Control-Request-Headers')) {
+      ctx.response.set('Access-Control-Allow-Headers', ctx.request.get('Access-Control-Request-Headers'));
+    }
+
+    ctx.response.status = 204;
   }
 });
 
+app.use(koaBody({
+  text: true,
+  urlencoded: true,
+  multipart: true,
+  json: true,
+}));
+
+const users = [];
+const messages = [];
+const router = new Router();
+
+router.post('/login', async (ctx, next) => {
+  if (users.find(item => item.name === ctx.request.body.name)) {
+    ctx.response.status = 409;
+  } else {
+    users.push({...ctx.request.body, id: uuid.v4()});
+    ctx.response.status = 204;
+  }
+});
+
+router.post('/newmessage', async (ctx, next) => {
+  messages.push(ctx.request.body);
+  ctx.response.status = 200;
+});
+
+router.delete('/delete/:name', async (ctx, next) => {
+  users.splice(users.indexOf(ctx.params.name));
+  ctx.response.status = 200
+});
+
+app.use(router.routes()).use(router.allowedMethods());
+
 const port = process.env.PORT || 7070;
-const server = http.createServer(app.callback()).listen(port);
+const server = http.createServer(app.callback());
+const wsServer = new WS.Server({ server });
+
+wsServer.on('connection', (ws, req) => {
+  ws.on('message', msg => {
+    [...wsServer.clients]
+    .filter(o => o.readyState === WS.OPEN)
+    .forEach(o => o.send(JSON.stringify([users, messages])));
+  });
+  ws.on('close', (msg) => {
+    users.pop();
+    [...wsServer.clients]
+    .filter(o => o.readyState === WS.OPEN)
+    .forEach(o => o.send(JSON.stringify([users, messages])));
+  });
+  ws.send('connected');
+});
+
+server.listen(port);
